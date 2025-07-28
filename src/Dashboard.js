@@ -1,25 +1,27 @@
 import React, { useEffect, useState } from "react";
 import { ref, onValue } from "firebase/database";
-import { database } from "./firebase"; // Make sure this is from Realtime Database, not Firestore
+import { database } from "./firebase";
 
 function Dashboard() {
   const [users, setUsers] = useState({});
 
   useEffect(() => {
-    const statusRef = collection(firestore, "status");
-    const q = query(statusRef, where("online", "==", true));
+    const statusRef = ref(database, "status");
 
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const data = {};
-      snapshot.forEach((doc) => {
-        data[doc.id] = doc.data();
+    const unsubscribe = onValue(statusRef, (snapshot) => {
+      const data = snapshot.val() || {};
+      const onlineUsers = {};
+
+      Object.entries(data).forEach(([uid, user]) => {
+        if (user.online) {
+          onlineUsers[uid] = user;
+        }
       });
-      setUsers(data);
+
+      setUsers(onlineUsers);
     });
 
-    return () => {
-      unsubscribe(); // Stop listening on unmount
-    };
+    return () => unsubscribe();
   }, []);
 
   return (
@@ -36,8 +38,6 @@ function Dashboard() {
 }
 
 export default Dashboard;
-
-
 
 
 
