@@ -1,21 +1,11 @@
 import React, { useEffect, useState, useRef } from "react";
 import { MapContainer, TileLayer, Marker, Popup, Polyline } from "react-leaflet";
-import {
-  collection,
-  doc,
-  addDoc,
-  setDoc,
-  onSnapshot,
-  query,
-  orderBy,
-  serverTimestamp,
-} from "firebase/firestore";
-import { firestore, auth, onAuthStateChanged } from "./firebase";
+import { ref, push, onValue, set, onDisconnect, serverTimestamp } from "firebase/database";
+import { database, auth, onAuthStateChanged } from "./firebase"; 
 import "leaflet/dist/leaflet.css";
 import L from "leaflet";
 
-// Custom icon
-const userIcon = new L.Icon({
+const blueIcon = new L.Icon({
   iconUrl: "https://cdn-icons-png.flaticon.com/512/684/684908.png",
   iconSize: [30, 30],
   iconAnchor: [15, 15],
@@ -28,71 +18,75 @@ function getDistance(loc1, loc2) {
   const dLng = toRad(loc2.lng - loc1.lng);
   const a =
     Math.sin(dLat / 2) ** 2 +
-    Math.cos(toRad(loc1.lat)) * Math.cos(toRad(loc2.lat)) * Math.sin(dLng / 2) ** 2;
+    Math.cos(toRad(loc1.lat)) *
+      Math.cos(toRad(loc2.lat)) *
+      Math.sin(dLng / 2) ** 2;
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return R * c;
 }
 
 function App() {
-  const [userId, setUserId] = useState(null);
   const [currentPosition, setCurrentPosition] = useState(null);
   const [userPaths, setUserPaths] = useState({});
+  const [userId, setUserId] = useState(null);
   const lastLocation = useRef(null);
-  const unsubscribes = useRef({});
 
-  // Auth setup
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
       if (user) {
         setUserId(user.uid);
-        const statusRef = doc(firestore, "status", user.uid);
-        await setDoc(statusRef, {
-          email: user.email,
+
+        const statusRef = ref(database, `status/${user.uid}`);
+        set(statusRef, {
           online: true,
-          lastOnline: serverTimestamp(),
+          email: user.email,
         });
-        window.addEventListener("beforeunload", () => {
-          setDoc(statusRef, {
-            online: false,
-            lastOnline: serverTimestamp(),
-          });
-        });
+        onDisconnect(statusRef).remove();
+
+        const userPathRef = ref(database, `livePaths/${user.uid}`);
+        onDisconnect(userPathRef).remove();
       } else {
         window.location.href = "/login";
       }
     });
+
     return unsubscribe;
   }, []);
 
-  // Save GPS position
   useEffect(() => {
     if (!userId) return;
 
-    const MIN_DISTANCE = 2;
-    const MIN_TIME = 1000;
+    const MIN_MOVEMENT_DISTANCE = 2; // meters
+    const MIN_TIME_BETWEEN_UPDATES = 1000; // ms
 
     const watchId = navigator.geolocation.watchPosition(
-      async (pos) => {
-        const { latitude, longitude } = pos.coords;
+      (position) => {
+        const { latitude, longitude } = position.coords;
         const now = Date.now();
 
         if (lastLocation.current) {
           const dist = getDistance(lastLocation.current, { lat: latitude, lng: longitude });
-          const time = now - lastLocation.current.time;
-          if (dist < MIN_DISTANCE && time < MIN_TIME) return;
+          const timeDiff = now - lastLocation.current.localTime;
+          if (dist < MIN_MOVEMENT_DISTANCE && timeDiff < MIN_TIME_BETWEEN_UPDATES) return;
         }
 
-        lastLocation.current = { lat: latitude, lng: longitude, time: now };
-        setCurrentPosition([latitude, longitude]);
+        lastLocation.current = {
+          lat: latitude,
+          lng: longitude,
+          localTime: now,
+        };
 
-        const locRef = collection(firestore, "livePaths", userId, "locations");
-        await addDoc(locRef, {
+        const userPathRef = ref(database, `livePaths/${userId}`);
+        const newLocRef = push(userPathRef);
+        set(newLocRef, {
           lat: latitude,
           lng: longitude,
           timestamp: serverTimestamp(),
         });
+
+        setCurrentPosition([latitude, longitude]);
       },
-      (err) => console.error("Geolocation error:", err),
+      (err) => console.error("GPS Error:", err),
       {
         enableHighAccuracy: true,
         maximumAge: 0,
@@ -103,90 +97,63 @@ function App() {
     return () => navigator.geolocation.clearWatch(watchId);
   }, [userId]);
 
-  // Listen to all users
   useEffect(() => {
-    const mainRef = collection(firestore, "livePaths");
-    const unsub = onSnapshot(mainRef, (snapshot) => {
-      snapshot.docChanges().forEach((change) => {
-        const uid = change.doc.id;
+    const pathRef = ref(database, "livePaths");
 
-        if (change.type === "removed") {
-          if (unsubscribes.current[uid]) unsubscribes.current[uid]();
-          delete unsubscribes.current[uid];
-          setUserPaths((prev) => {
-            const copy = { ...prev };
-            delete copy[uid];
-            return copy;
-          });
-          return;
+    const unsubscribe = onValue(pathRef, (snapshot) => {
+      const data = snapshot.val() || {};
+      const filteredPaths = {};
+
+      Object.entries(data).forEach(([uid, pathPoints]) => {
+        const userTrail = Object.values(pathPoints)
+          .filter((p) => p.lat && p.lng && p.timestamp)
+          .map((p) => p);
+
+        if (userTrail.length > 0) {
+          filteredPaths[uid] = userTrail;
         }
-
-        const q = query(collection(firestore, "livePaths", uid, "locations"), orderBy("timestamp"));
-        if (unsubscribes.current[uid]) unsubscribes.current[uid]();
-        unsubscribes.current[uid] = onSnapshot(q, (locSnap) => {
-          const path = [];
-          locSnap.forEach((doc) => {
-            const data = doc.data();
-            path.push(data);
-          });
-          setUserPaths((prev) => ({ ...prev, [uid]: path }));
-        });
       });
+
+      setUserPaths(filteredPaths);
     });
 
-    return () => {
-      unsub();
-      Object.values(unsubscribes.current).forEach((fn) => fn());
-    };
+    return () => unsubscribe();
   }, []);
 
-  if (!currentPosition) return <div>Waiting for GPS...</div>;
+  if (!currentPosition) {
+    return <div style={{ padding: 20 }}>Waiting for GPS...</div>;
+  }
 
   return (
     <div style={{ height: "100vh", width: "100vw" }}>
-      <MapContainer center={currentPosition} zoom={16} style={{ height: "100%", width: "100%" }}>
+      <MapContainer center={currentPosition} zoom={16} scrollWheelZoom style={{ height: "100%", width: "100%" }}>
         <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
-
         {Object.entries(userPaths).map(([uid, trail]) => {
-          if (!trail.length) return null;
           const last = trail[trail.length - 1];
           return (
             <React.Fragment key={uid}>
-              <Marker position={[last.lat, last.lng]} icon={userIcon}>
+              <Marker position={[last.lat, last.lng]} icon={blueIcon}>
                 <Popup>
-                  <b>🧍 User ID:</b> {uid}
+                  🧍 User ID: <b>{uid}</b>
                   <br />
-                  <b>🕒 Time:</b>{" "}
-                  {last.timestamp?.toDate ? last.timestamp.toDate().toLocaleString() : "N/A"}
+                  🕒 Time:{" "}
+                  {typeof last.timestamp === "object" && last.timestamp.hasOwnProperty("toMillis")
+                    ? new Date(last.timestamp.toMillis()).toLocaleString()
+                    : new Date(last.timestamp).toLocaleString()}
                 </Popup>
               </Marker>
               {trail.length > 1 && (
-                <Polyline
-                  positions={trail.map((p) => [p.lat, p.lng])}
-                  color="red"
-                  weight={3}
-                  opacity={0.7}
-                />
+                <Polyline positions={trail.map((p) => [p.lat, p.lng])} color="red" weight={3} opacity={0.8} />
               )}
             </React.Fragment>
           );
         })}
-
-        {/* Your current marker */}
-        <Marker position={currentPosition} icon={userIcon}>
-           <Popup>
-    🧍 User ID: <b>{userId}</b>
-    <br />
-    🕒 Time: <b>{new Date().toLocaleString()}</b>
-  </Popup>
-        </Marker>
       </MapContainer>
     </div>
   );
 }
 
 export default App;
-
 
 
 
