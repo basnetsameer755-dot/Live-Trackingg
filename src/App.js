@@ -134,12 +134,13 @@ function App() {
             <React.Fragment key={uid}>
               <Marker position={[last.lat, last.lng]} icon={blueIcon}>
                 <Popup>
-                  🧍 User ID: <b>{uid}</b>
-                  <br />
+                  🧍 User ID: <b>{uid}</b> <br />
                   🕒 Time:{" "}
                   {typeof last.timestamp === "object" && last.timestamp.hasOwnProperty("toMillis")
                     ? new Date(last.timestamp.toMillis()).toLocaleString()
-                    : new Date(last.timestamp).toLocaleString()}
+                    : new Date(last.timestamp).toLocaleString()} <br />
+                  📍 Lat: {last.lat.toFixed(6)} <br />
+                  📍 Lng: {last.lng.toFixed(6)}
                 </Popup>
               </Marker>
               {trail.length > 1 && (
@@ -154,6 +155,5 @@ function App() {
 }
 
 export default App;
-
 
 
